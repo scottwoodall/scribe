@@ -201,9 +201,11 @@ fn extract_elixir_imports_with_ast(_content: &str) -> Option<Vec<String>> {
 }
 
 fn extract_elixir_imports_line_based(content: &str, imports: &mut HashSet<String>) {
+    let mut heredoc_state: Option<ElixirHeredocDelimiter> = None;
+
     for line in content.lines() {
-        let trimmed = line.trim();
-        let without_comments = trimmed.split('#').next().unwrap_or("").trim();
+        let without_heredocs = strip_elixir_heredocs_from_line(line, &mut heredoc_state);
+        let without_comments = without_heredocs.split('#').next().unwrap_or("").trim();
         if without_comments.is_empty() {
             continue;
         }
@@ -215,6 +217,72 @@ fn extract_elixir_imports_line_based(content: &str, imports: &mut HashSet<String
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElixirHeredocDelimiter {
+    TripleDouble,
+    TripleSingle,
+}
+
+impl ElixirHeredocDelimiter {
+    fn token(self) -> &'static str {
+        match self {
+            ElixirHeredocDelimiter::TripleDouble => "\"\"\"",
+            ElixirHeredocDelimiter::TripleSingle => "'''",
+        }
+    }
+}
+
+fn strip_elixir_heredocs_from_line(
+    line: &str,
+    heredoc_state: &mut Option<ElixirHeredocDelimiter>,
+) -> String {
+    let mut output = String::new();
+    let mut cursor = line;
+
+    loop {
+        if let Some(active_delimiter) = *heredoc_state {
+            if let Some(end_index) = cursor.find(active_delimiter.token()) {
+                cursor = &cursor[end_index + active_delimiter.token().len()..];
+                *heredoc_state = None;
+                continue;
+            }
+
+            return output;
+        }
+
+        let next_double = cursor.find("\"\"\"");
+        let next_single = cursor.find("'''");
+
+        let next_delimiter = match (next_double, next_single) {
+            (Some(double_idx), Some(single_idx)) if double_idx <= single_idx => {
+                Some((double_idx, ElixirHeredocDelimiter::TripleDouble))
+            }
+            (Some(_), Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
+            (Some(double_idx), None) => Some((double_idx, ElixirHeredocDelimiter::TripleDouble)),
+            (None, Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
+            (None, None) => None,
+        };
+
+        let Some((start_index, delimiter)) = next_delimiter else {
+            output.push_str(cursor);
+            break;
+        };
+
+        output.push_str(&cursor[..start_index]);
+        cursor = &cursor[start_index + delimiter.token().len()..];
+
+        if let Some(end_index) = cursor.find(delimiter.token()) {
+            cursor = &cursor[end_index + delimiter.token().len()..];
+            continue;
+        }
+
+        *heredoc_state = Some(delimiter);
+        break;
+    }
+
+    output
 }
 
 /// Extract one Elixir import statement, including grouped aliases like
@@ -435,6 +503,33 @@ alias MyApp.Repo
         assert!(!imports.iter().any(|module| module == "Fake.Module"));
         assert!(!imports.iter().any(|module| module == "Hidden.Module"));
         assert!(!imports.iter().any(|module| module == "Not.Real"));
+    }
+
+    #[test]
+    fn test_elixir_line_fallback_ignores_heredoc_imports() {
+        let content = r#"
+alias MyApp.Repo
+
+doc = """
+import Not.Real
+alias Also.Not.Real
+"""
+
+notes = '''
+use Another.Not.Real
+'''
+
+require Logger
+"#;
+
+        let mut imports = HashSet::new();
+        extract_elixir_imports_line_based(content, &mut imports);
+
+        assert!(imports.contains("MyApp.Repo"));
+        assert!(imports.contains("Logger"));
+        assert!(!imports.contains("Not.Real"));
+        assert!(!imports.contains("Also.Not.Real"));
+        assert!(!imports.contains("Another.Not.Real"));
     }
 
     #[test]

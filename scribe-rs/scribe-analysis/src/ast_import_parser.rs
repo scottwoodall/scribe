@@ -32,15 +32,15 @@ pub enum ImportLanguage {
 }
 
 impl ImportLanguage {
-    /// Get the tree-sitter language for this language when available.
-    pub fn tree_sitter_language(&self) -> Option<Language> {
+    /// Get the tree-sitter language for this language.
+    pub fn tree_sitter_language(&self) -> Language {
         match self {
-            ImportLanguage::Python => Some(tree_sitter_python::language()),
-            ImportLanguage::JavaScript => Some(tree_sitter_javascript::language()),
-            ImportLanguage::TypeScript => Some(tree_sitter_typescript::language_typescript()),
-            ImportLanguage::Go => Some(tree_sitter_go::language()),
-            ImportLanguage::Rust => Some(tree_sitter_rust::language()),
-            ImportLanguage::Elixir => Some(tree_sitter_elixir::language()),
+            ImportLanguage::Python => tree_sitter_python::language(),
+            ImportLanguage::JavaScript => tree_sitter_javascript::language(),
+            ImportLanguage::TypeScript => tree_sitter_typescript::language_typescript(),
+            ImportLanguage::Go => tree_sitter_go::language(),
+            ImportLanguage::Rust => tree_sitter_rust::language(),
+            ImportLanguage::Elixir => tree_sitter_elixir::language(),
         }
     }
 
@@ -108,11 +108,7 @@ impl SimpleAstParser {
         ] {
             if !pool.contains_key(&language) {
                 let mut parser = Parser::new();
-                let ts_language = language.tree_sitter_language().ok_or_else(|| {
-                    scribe_core::ScribeError::parse(
-                        "No tree-sitter language available for import parser language",
-                    )
-                })?;
+                let ts_language = language.tree_sitter_language();
                 parser.set_language(ts_language).map_err(|e| {
                     scribe_core::ScribeError::parse(format!(
                         "Failed to set tree-sitter language: {}",
@@ -138,11 +134,7 @@ impl SimpleAstParser {
 
         // Create a new parser if pool is empty
         let mut parser = Parser::new();
-        let ts_language = language.tree_sitter_language().ok_or_else(|| {
-            scribe_core::ScribeError::parse(
-                "No tree-sitter language available for import parser language",
-            )
-        })?;
+        let ts_language = language.tree_sitter_language();
         parser.set_language(ts_language).map_err(|e| {
             scribe_core::ScribeError::parse(format!("Failed to set tree-sitter language: {}", e))
         })?;
@@ -548,10 +540,11 @@ impl SimpleAstParser {
     /// Extract Elixir imports using a lightweight regex-free line parser.
     fn extract_elixir_imports_regex(&self, content: &str) -> Vec<SimpleImport> {
         let mut imports = Vec::new();
+        let mut heredoc_state: Option<ElixirHeredocDelimiter> = None;
 
         for (idx, line) in content.lines().enumerate() {
-            let trimmed = line.trim();
-            let without_comments = trimmed.split('#').next().unwrap_or("").trim();
+            let without_heredocs = strip_elixir_heredocs_from_line(line, &mut heredoc_state);
+            let without_comments = without_heredocs.split('#').next().unwrap_or("").trim();
             if without_comments.is_empty() {
                 continue;
             }
@@ -663,6 +656,72 @@ impl SimpleAstParser {
             .map(|content| self.extract_imports(content, language))
             .collect()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElixirHeredocDelimiter {
+    TripleDouble,
+    TripleSingle,
+}
+
+impl ElixirHeredocDelimiter {
+    fn token(self) -> &'static str {
+        match self {
+            ElixirHeredocDelimiter::TripleDouble => "\"\"\"",
+            ElixirHeredocDelimiter::TripleSingle => "'''",
+        }
+    }
+}
+
+fn strip_elixir_heredocs_from_line(
+    line: &str,
+    heredoc_state: &mut Option<ElixirHeredocDelimiter>,
+) -> String {
+    let mut output = String::new();
+    let mut cursor = line;
+
+    loop {
+        if let Some(active_delimiter) = *heredoc_state {
+            if let Some(end_index) = cursor.find(active_delimiter.token()) {
+                cursor = &cursor[end_index + active_delimiter.token().len()..];
+                *heredoc_state = None;
+                continue;
+            }
+
+            return output;
+        }
+
+        let next_double = cursor.find("\"\"\"");
+        let next_single = cursor.find("'''");
+
+        let next_delimiter = match (next_double, next_single) {
+            (Some(double_idx), Some(single_idx)) if double_idx <= single_idx => {
+                Some((double_idx, ElixirHeredocDelimiter::TripleDouble))
+            }
+            (Some(_), Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
+            (Some(double_idx), None) => Some((double_idx, ElixirHeredocDelimiter::TripleDouble)),
+            (None, Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
+            (None, None) => None,
+        };
+
+        let Some((start_index, delimiter)) = next_delimiter else {
+            output.push_str(cursor);
+            break;
+        };
+
+        output.push_str(&cursor[..start_index]);
+        cursor = &cursor[start_index + delimiter.token().len()..];
+
+        if let Some(end_index) = cursor.find(delimiter.token()) {
+            cursor = &cursor[end_index + delimiter.token().len()..];
+            continue;
+        }
+
+        *heredoc_state = Some(delimiter);
+        break;
+    }
+
+    output
 }
 
 impl Default for SimpleAstParser {
@@ -877,6 +936,33 @@ end
         assert!(!imports.iter().any(|i| i.module == "Fake.Module"));
         assert!(!imports.iter().any(|i| i.module == "Hidden.Module"));
         assert!(!imports.iter().any(|i| i.module == "Not.Real"));
+    }
+
+    #[test]
+    fn test_elixir_regex_fallback_ignores_heredoc_imports() {
+        let parser = SimpleAstParser::new().unwrap();
+        let code = r#"
+alias MyApp.Repo
+
+doc = """
+import Not.Real
+alias Also.Not.Real
+"""
+
+notes = '''
+use Another.Not.Real
+'''
+
+require Logger
+"#;
+
+        let imports = parser.extract_elixir_imports_regex(code);
+
+        assert!(imports.iter().any(|i| i.module == "MyApp.Repo"));
+        assert!(imports.iter().any(|i| i.module == "Logger"));
+        assert!(!imports.iter().any(|i| i.module == "Not.Real"));
+        assert!(!imports.iter().any(|i| i.module == "Also.Not.Real"));
+        assert!(!imports.iter().any(|i| i.module == "Another.Not.Real"));
     }
 
     #[test]
