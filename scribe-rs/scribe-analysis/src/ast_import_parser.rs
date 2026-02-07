@@ -40,7 +40,7 @@ impl ImportLanguage {
             ImportLanguage::TypeScript => Some(tree_sitter_typescript::language_typescript()),
             ImportLanguage::Go => Some(tree_sitter_go::language()),
             ImportLanguage::Rust => Some(tree_sitter_rust::language()),
-            ImportLanguage::Elixir => None,
+            ImportLanguage::Elixir => Some(tree_sitter_elixir::language()),
         }
     }
 
@@ -104,6 +104,7 @@ impl SimpleAstParser {
             ImportLanguage::TypeScript,
             ImportLanguage::Go,
             ImportLanguage::Rust,
+            ImportLanguage::Elixir,
         ] {
             if !pool.contains_key(&language) {
                 let mut parser = Parser::new();
@@ -143,10 +144,7 @@ impl SimpleAstParser {
             )
         })?;
         parser.set_language(ts_language).map_err(|e| {
-            scribe_core::ScribeError::parse(format!(
-                "Failed to set tree-sitter language: {}",
-                e
-            ))
+            scribe_core::ScribeError::parse(format!("Failed to set tree-sitter language: {}", e))
         })?;
         Ok(parser)
     }
@@ -179,8 +177,10 @@ impl SimpleAstParser {
                     is_typescript,
                 ))
             }
-            // Elixir currently uses a regex-based fallback (no tree-sitter dependency)
-            ImportLanguage::Elixir => Ok(self.extract_elixir_imports_regex(content)),
+            // Elixir uses tree-sitter first, with line-based fallback on parse/setup failure.
+            ImportLanguage::Elixir => self
+                .extract_imports_treesitter(content, language)
+                .or_else(|_| Ok(self.extract_elixir_imports_regex(content))),
             // Use tree-sitter for other languages
             _ => self.extract_imports_treesitter(content, language),
         }
@@ -221,13 +221,16 @@ impl SimpleAstParser {
     ) -> Result<()> {
         let node = cursor.node();
 
-        // Fast filter: skip nodes that can't contain imports
-        if !self.node_can_contain_imports(node.kind()) {
+        // Fast filter: skip nodes that can't contain imports.
+        // For Elixir, traverse all nodes because import-related constructs are generic `call` nodes.
+        if language != ImportLanguage::Elixir && !self.node_can_contain_imports(node.kind()) {
             return Ok(());
         }
 
         // Process current node if it's an import
-        if self.is_import_node(node.kind()) {
+        if self.is_import_node(node.kind())
+            || (language == ImportLanguage::Elixir && node.kind() == "call")
+        {
             self.extract_import_from_node(node, content, language, imports)?;
         }
 
@@ -290,7 +293,7 @@ impl SimpleAstParser {
                 self.extract_rust_import_node(node, content, imports)?;
             }
             ImportLanguage::Elixir => {
-                // Elixir is handled by regex fallback in extract_imports
+                self.extract_elixir_import_node(node, content, imports)?;
             }
         }
         Ok(())
@@ -419,6 +422,127 @@ impl SimpleAstParser {
             }
         }
         Ok(())
+    }
+
+    /// Extract Elixir imports from `call` nodes (`alias`, `import`, `require`, `use`).
+    fn extract_elixir_import_node(
+        &self,
+        node: Node,
+        content: &str,
+        imports: &mut Vec<SimpleImport>,
+    ) -> Result<()> {
+        if node.kind() != "call" {
+            return Ok(());
+        }
+
+        let Some(target_node) = node.child_by_field_name("target") else {
+            return Ok(());
+        };
+
+        if target_node.kind() != "identifier" {
+            return Ok(());
+        }
+
+        let target_name = self.node_text(target_node, content);
+        if !matches!(target_name.as_str(), "alias" | "import" | "require" | "use") {
+            return Ok(());
+        }
+
+        let line_number = node.start_position().row + 1;
+        for module in self.extract_elixir_call_modules(node, content) {
+            imports.push(SimpleImport {
+                module,
+                line_number,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn extract_elixir_call_modules(&self, call_node: Node, content: &str) -> Vec<String> {
+        let mut modules = Vec::new();
+
+        let mut cursor = call_node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.kind() == "arguments" {
+                    modules.extend(Self::extract_elixir_modules_from_expression(child, content));
+                }
+
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+
+        modules
+    }
+
+    fn extract_elixir_modules_from_expression(node: Node, content: &str) -> Vec<String> {
+        match node.kind() {
+            "alias" => Self::normalize_elixir_module(&content[node.start_byte()..node.end_byte()])
+                .into_iter()
+                .collect(),
+            "arguments" | "tuple" | "list" => {
+                let mut modules = Vec::new();
+                for idx in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(idx) {
+                        if child.kind() == "keywords" {
+                            continue;
+                        }
+                        modules
+                            .extend(Self::extract_elixir_modules_from_expression(child, content));
+                    }
+                }
+                modules
+            }
+            "dot" => Self::extract_elixir_modules_from_dot(node, content),
+            _ => Vec::new(),
+        }
+    }
+
+    fn extract_elixir_modules_from_dot(node: Node, content: &str) -> Vec<String> {
+        let Some(left) = node.child_by_field_name("left") else {
+            return Vec::new();
+        };
+        let Some(right) = node.child_by_field_name("right") else {
+            return Vec::new();
+        };
+
+        let base_modules = Self::extract_elixir_modules_from_expression(left, content);
+        if base_modules.is_empty() {
+            return Vec::new();
+        }
+
+        if right.kind() == "tuple" {
+            let mut expanded = Vec::new();
+            for idx in 0..right.named_child_count() {
+                if let Some(entry) = right.named_child(idx) {
+                    let suffixes = Self::extract_elixir_modules_from_expression(entry, content);
+                    for base in &base_modules {
+                        for suffix in &suffixes {
+                            expanded.push(format!("{}.{}", base, suffix));
+                        }
+                    }
+                }
+            }
+            return expanded;
+        }
+
+        let right_modules = Self::extract_elixir_modules_from_expression(right, content);
+        if right_modules.is_empty() {
+            return Vec::new();
+        }
+
+        let mut joined = Vec::new();
+        for base in &base_modules {
+            for right_module in &right_modules {
+                joined.push(format!("{}.{}", base, right_module));
+            }
+        }
+
+        joined
     }
 
     /// Extract Elixir imports using a lightweight regex-free line parser.
@@ -665,7 +789,9 @@ require Logger
 use MyAppWeb, :controller
 "#;
 
-        let imports = parser.extract_imports(code, ImportLanguage::Elixir).unwrap();
+        let imports = parser
+            .extract_imports(code, ImportLanguage::Elixir)
+            .unwrap();
 
         assert!(!imports.is_empty());
         assert!(imports.iter().any(|i| i.module == "MyApp.Repo"));
@@ -678,7 +804,10 @@ use MyAppWeb, :controller
 
     #[test]
     fn test_import_language_from_extension_elixir() {
-        assert_eq!(ImportLanguage::from_extension("ex"), Some(ImportLanguage::Elixir));
+        assert_eq!(
+            ImportLanguage::from_extension("ex"),
+            Some(ImportLanguage::Elixir)
+        );
         assert_eq!(
             ImportLanguage::from_extension("exs"),
             Some(ImportLanguage::Elixir)
@@ -695,9 +824,59 @@ alias MyApp.{
 }
 "#;
 
-        let imports = parser.extract_imports(code, ImportLanguage::Elixir).unwrap();
+        let imports = parser
+            .extract_imports(code, ImportLanguage::Elixir)
+            .unwrap();
         assert!(!imports.iter().any(|i| i.module == "MyApp"));
         assert!(!imports.iter().any(|i| i.module == "MyApp."));
+    }
+
+    #[test]
+    fn test_elixir_import_options_are_ignored() {
+        let parser = SimpleAstParser::new().unwrap();
+        let code = r#"
+alias MyApp.Accounts.User, as: AccountUser
+import Plug.Conn, only: [put_status: 2]
+require Logger, as: AppLogger
+use Phoenix.Controller, namespace: MyAppWeb
+"#;
+
+        let imports = parser
+            .extract_imports(code, ImportLanguage::Elixir)
+            .unwrap();
+
+        assert!(imports.iter().any(|i| i.module == "MyApp.Accounts.User"));
+        assert!(imports.iter().any(|i| i.module == "Plug.Conn"));
+        assert!(imports.iter().any(|i| i.module == "Logger"));
+        assert!(imports.iter().any(|i| i.module == "Phoenix.Controller"));
+        assert!(!imports.iter().any(|i| i.module == "AccountUser"));
+        assert!(!imports.iter().any(|i| i.module == "AppLogger"));
+        assert!(!imports.iter().any(|i| i.module == "MyAppWeb"));
+    }
+
+    #[test]
+    fn test_elixir_comments_and_strings_do_not_emit_imports() {
+        let parser = SimpleAstParser::new().unwrap();
+        let code = r#"
+# alias Fake.Module
+text = "alias Hidden.Module"
+doc = """
+import Not.Real
+"""
+
+defmodule MyApp do
+  alias MyApp.Repo
+end
+"#;
+
+        let imports = parser
+            .extract_imports(code, ImportLanguage::Elixir)
+            .unwrap();
+
+        assert!(imports.iter().any(|i| i.module == "MyApp.Repo"));
+        assert!(!imports.iter().any(|i| i.module == "Fake.Module"));
+        assert!(!imports.iter().any(|i| i.module == "Hidden.Module"));
+        assert!(!imports.iter().any(|i| i.module == "Not.Real"));
     }
 
     #[test]

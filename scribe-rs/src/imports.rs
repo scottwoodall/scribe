@@ -6,6 +6,9 @@
 use scribe_core::Language;
 use std::collections::HashSet;
 
+#[cfg(feature = "analysis")]
+use scribe_analysis::ast_import_parser::{ImportLanguage as AstImportLanguage, SimpleAstParser};
+
 /// Extract import statements from source code content.
 ///
 /// This function parses the content and extracts import/use/require statements
@@ -174,6 +177,30 @@ pub fn extract_go_import_path(line: &str) -> Option<String> {
 
 /// Extract Elixir imports (`alias`, `import`, `require`, `use`) from content
 pub fn extract_elixir_imports(content: &str, imports: &mut HashSet<String>) {
+    if let Some(ast_imports) = extract_elixir_imports_with_ast(content) {
+        imports.extend(ast_imports);
+        return;
+    }
+
+    extract_elixir_imports_line_based(content, imports);
+}
+
+#[cfg(feature = "analysis")]
+fn extract_elixir_imports_with_ast(content: &str) -> Option<Vec<String>> {
+    let parser = SimpleAstParser::new().ok()?;
+    let imports = parser
+        .extract_imports(content, AstImportLanguage::Elixir)
+        .ok()?;
+
+    Some(imports.into_iter().map(|import| import.module).collect())
+}
+
+#[cfg(not(feature = "analysis"))]
+fn extract_elixir_imports_with_ast(_content: &str) -> Option<Vec<String>> {
+    None
+}
+
+fn extract_elixir_imports_line_based(content: &str, imports: &mut HashSet<String>) {
     for line in content.lines() {
         let trimmed = line.trim();
         let without_comments = trimmed.split('#').next().unwrap_or("").trim();
@@ -370,6 +397,44 @@ alias MyApp.{
 
         assert!(!imports.iter().any(|module| module == "MyApp"));
         assert!(!imports.iter().any(|module| module == "MyApp."));
+    }
+
+    #[test]
+    fn test_elixir_options_are_ignored() {
+        let content = r#"
+alias MyApp.Accounts.User, as: AccountUser
+import Plug.Conn, only: [put_status: 2]
+require Logger, as: AppLogger
+use Phoenix.Controller, namespace: MyAppWeb
+        "#;
+        let imports = extract_imports(content, &Language::Elixir);
+
+        assert!(imports.contains(&"MyApp.Accounts.User".to_string()));
+        assert!(imports.contains(&"Plug.Conn".to_string()));
+        assert!(imports.contains(&"Logger".to_string()));
+        assert!(imports.contains(&"Phoenix.Controller".to_string()));
+        assert!(!imports.iter().any(|module| module == "AccountUser"));
+        assert!(!imports.iter().any(|module| module == "AppLogger"));
+        assert!(!imports.iter().any(|module| module == "MyAppWeb"));
+    }
+
+    #[test]
+    fn test_elixir_strings_do_not_emit_imports() {
+        let content = r#"
+# alias Fake.Module
+text = "alias Hidden.Module"
+doc = """
+import Not.Real
+"""
+
+alias MyApp.Repo
+        "#;
+        let imports = extract_imports(content, &Language::Elixir);
+
+        assert!(imports.contains(&"MyApp.Repo".to_string()));
+        assert!(!imports.iter().any(|module| module == "Fake.Module"));
+        assert!(!imports.iter().any(|module| module == "Hidden.Module"));
+        assert!(!imports.iter().any(|module| module == "Not.Real"));
     }
 
     #[test]

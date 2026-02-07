@@ -44,6 +44,10 @@ static TS_LANGUAGES: Lazy<HashMap<Language, fn() -> TsLanguage>> = Lazy::new(|| 
         tree_sitter_rust::language as fn() -> TsLanguage,
     );
     languages.insert(Language::Go, tree_sitter_go::language as fn() -> TsLanguage);
+    languages.insert(
+        Language::Elixir,
+        tree_sitter_elixir::language as fn() -> TsLanguage,
+    );
     languages
 });
 
@@ -343,8 +347,14 @@ mod tests {
             Language::Cpp
         );
         assert_eq!(detector.detect_language(Path::new("test.c")), Language::C);
-        assert_eq!(detector.detect_language(Path::new("test.ex")), Language::Elixir);
-        assert_eq!(detector.detect_language(Path::new("test.exs")), Language::Elixir);
+        assert_eq!(
+            detector.detect_language(Path::new("test.ex")),
+            Language::Elixir
+        );
+        assert_eq!(
+            detector.detect_language(Path::new("test.exs")),
+            Language::Elixir
+        );
     }
 
     #[test]
@@ -840,7 +850,11 @@ from module import thing
             ("test.js", "function main() {}", Language::JavaScript),
             ("test.ts", "function main(): void {}", Language::TypeScript),
             ("test.go", "func main() {}", Language::Go),
-            ("test.ex", "defmodule MyApp do\n  def run, do: :ok\nend", Language::Elixir),
+            (
+                "test.ex",
+                "defmodule MyApp do\n  def run, do: :ok\nend",
+                Language::Elixir,
+            ),
         ];
 
         for (path, code, expected_lang) in test_cases {
