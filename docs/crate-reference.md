@@ -89,7 +89,10 @@ let files = scanner.scan()?;
 | TypeScript | tree-sitter-typescript | Full |
 | JavaScript | tree-sitter-javascript | Full |
 | Go | tree-sitter-go | Full |
+| Elixir | tree-sitter-elixir | Partial |
 | Java | tree-sitter-java | Partial |
+
+Elixir import extraction is AST-first for `alias`/`import`/`require`/`use` (including grouped aliases), with line-based fallback if AST parsing fails.
 
 ### Usage
 

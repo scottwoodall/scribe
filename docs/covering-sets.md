@@ -168,7 +168,7 @@ pub struct PasswordHash {
 
 1. **Parse the target file** using tree-sitter AST parsing
 2. **Extract the target entity** and its local dependencies
-3. **Resolve imports** to find dependency files
+3. **Resolve imports** to find dependency files (Elixir uses AST-first extraction for `alias`/`import`/`require`/`use`, with line-parser fallback)
 4. **Recursively analyze** dependencies up to max depth
 5. **Filter by relevance** based on centrality and usage
 6. **Extract entities** at the configured granularity
@@ -185,9 +185,11 @@ Covering set analysis works best with these languages:
 | TypeScript | Full | Full |
 | JavaScript | Full | Full |
 | Go | Full | Full |
-| Elixir | Full | Partial |
+| Elixir | Full (AST-first + fallback) | Partial |
 | Java | Partial | Full |
 | C/C++ | Partial | Partial |
+
+Elixir import extraction supports grouped and multiline aliases (for example `alias MyApp.{Repo, Accounts.User}`) and ignores options like `as:` and `only:`.
 
 ## Tips
 

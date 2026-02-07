@@ -226,7 +226,7 @@ Import resolution and dependency tracking works for:
 | **Python** | `import`, `from...import`, relative imports |
 | **JavaScript/TypeScript** | ES6 `import`, `require()`, type imports |
 | **Go** | Single imports, block imports, aliased imports |
-| **Elixir** | `alias`, `import`, `require`, `use`, grouped aliases `alias App.{A, B}` |
+| **Elixir** | AST-first (`tree-sitter-elixir`) `alias`, `import`, `require`, `use`; grouped aliases including multiline `alias App.{A, B}` (line-parser fallback on AST failure) |
 
 ## CLI Reference
 

@@ -106,7 +106,7 @@ One call. Complete context. No iterative discovery.
 Don't read 800 lines to understand a 20-line function:
 
 - Extract exactly the entities you need
-- Multi-language AST support (Python, JS/TS, Rust, Go)
+- Multi-language AST support (Python, JS/TS, Rust, Go, and Elixir import analysis)
 - 95%+ relevance vs 5% with file-level tools
 
 ### 4. Transformer-Aware Context Positioning
