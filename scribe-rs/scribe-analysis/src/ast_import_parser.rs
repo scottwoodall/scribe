@@ -174,10 +174,8 @@ impl SimpleAstParser {
                     is_typescript,
                 ))
             }
-            // Elixir uses tree-sitter first, with line-based fallback on parse/setup failure.
-            ImportLanguage::Elixir => self
-                .extract_imports_treesitter(content, language)
-                .or_else(|_| Ok(self.extract_elixir_imports_regex(content))),
+            // Elixir uses tree-sitter AST extraction.
+            ImportLanguage::Elixir => self.extract_imports_treesitter(content, language),
             // Use tree-sitter for other languages
             _ => self.extract_imports_treesitter(content, language),
         }
@@ -542,64 +540,6 @@ impl SimpleAstParser {
         joined
     }
 
-    /// Extract Elixir imports using a lightweight regex-free line parser.
-    fn extract_elixir_imports_regex(&self, content: &str) -> Vec<SimpleImport> {
-        let mut imports = Vec::new();
-        let mut heredoc_state: Option<ElixirHeredocDelimiter> = None;
-
-        for (idx, line) in content.lines().enumerate() {
-            let without_heredocs = strip_elixir_heredocs_from_line(line, &mut heredoc_state);
-            let without_comments = without_heredocs.split('#').next().unwrap_or("").trim();
-            if without_comments.is_empty() {
-                continue;
-            }
-
-            for keyword in ["alias ", "import ", "require ", "use "] {
-                if let Some(statement) = without_comments.strip_prefix(keyword) {
-                    self.extract_elixir_statement(statement, idx + 1, &mut imports);
-                    break;
-                }
-            }
-        }
-
-        imports
-    }
-
-    fn extract_elixir_statement(
-        &self,
-        statement: &str,
-        line_number: usize,
-        imports: &mut Vec<SimpleImport>,
-    ) {
-        if let Some((base, remainder)) = statement.split_once('{') {
-            let base = Self::normalize_elixir_module(base.trim_end_matches('.'));
-            if let Some(end) = remainder.find('}') {
-                let grouped = &remainder[..end];
-                for module in grouped.split(',') {
-                    if let Some(module) = Self::normalize_elixir_module(module) {
-                        let module = if let Some(ref base) = base {
-                            format!("{}.{}", base, module)
-                        } else {
-                            module
-                        };
-                        imports.push(SimpleImport {
-                            module,
-                            line_number,
-                        });
-                    }
-                }
-            }
-            return;
-        }
-
-        if let Some(module) = Self::normalize_elixir_module(statement) {
-            imports.push(SimpleImport {
-                module,
-                line_number,
-            });
-        }
-    }
-
     fn normalize_elixir_module(raw: &str) -> Option<String> {
         let mut module = raw.trim();
 
@@ -661,72 +601,6 @@ impl SimpleAstParser {
             .map(|content| self.extract_imports(content, language))
             .collect()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ElixirHeredocDelimiter {
-    TripleDouble,
-    TripleSingle,
-}
-
-impl ElixirHeredocDelimiter {
-    fn token(self) -> &'static str {
-        match self {
-            ElixirHeredocDelimiter::TripleDouble => "\"\"\"",
-            ElixirHeredocDelimiter::TripleSingle => "'''",
-        }
-    }
-}
-
-fn strip_elixir_heredocs_from_line(
-    line: &str,
-    heredoc_state: &mut Option<ElixirHeredocDelimiter>,
-) -> String {
-    let mut output = String::new();
-    let mut cursor = line;
-
-    loop {
-        if let Some(active_delimiter) = *heredoc_state {
-            if let Some(end_index) = cursor.find(active_delimiter.token()) {
-                cursor = &cursor[end_index + active_delimiter.token().len()..];
-                *heredoc_state = None;
-                continue;
-            }
-
-            return output;
-        }
-
-        let next_double = cursor.find("\"\"\"");
-        let next_single = cursor.find("'''");
-
-        let next_delimiter = match (next_double, next_single) {
-            (Some(double_idx), Some(single_idx)) if double_idx <= single_idx => {
-                Some((double_idx, ElixirHeredocDelimiter::TripleDouble))
-            }
-            (Some(_), Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
-            (Some(double_idx), None) => Some((double_idx, ElixirHeredocDelimiter::TripleDouble)),
-            (None, Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
-            (None, None) => None,
-        };
-
-        let Some((start_index, delimiter)) = next_delimiter else {
-            output.push_str(cursor);
-            break;
-        };
-
-        output.push_str(&cursor[..start_index]);
-        cursor = &cursor[start_index + delimiter.token().len()..];
-
-        if let Some(end_index) = cursor.find(delimiter.token()) {
-            cursor = &cursor[end_index + delimiter.token().len()..];
-            continue;
-        }
-
-        *heredoc_state = Some(delimiter);
-        break;
-    }
-
-    output
 }
 
 impl Default for SimpleAstParser {
@@ -941,33 +815,6 @@ end
         assert!(!imports.iter().any(|i| i.module == "Fake.Module"));
         assert!(!imports.iter().any(|i| i.module == "Hidden.Module"));
         assert!(!imports.iter().any(|i| i.module == "Not.Real"));
-    }
-
-    #[test]
-    fn test_elixir_regex_fallback_ignores_heredoc_imports() {
-        let parser = SimpleAstParser::new().unwrap();
-        let code = r#"
-alias MyApp.Repo
-
-doc = """
-import Not.Real
-alias Also.Not.Real
-"""
-
-notes = '''
-use Another.Not.Real
-'''
-
-require Logger
-"#;
-
-        let imports = parser.extract_elixir_imports_regex(code);
-
-        assert!(imports.iter().any(|i| i.module == "MyApp.Repo"));
-        assert!(imports.iter().any(|i| i.module == "Logger"));
-        assert!(!imports.iter().any(|i| i.module == "Not.Real"));
-        assert!(!imports.iter().any(|i| i.module == "Also.Not.Real"));
-        assert!(!imports.iter().any(|i| i.module == "Another.Not.Real"));
     }
 
     #[test]
