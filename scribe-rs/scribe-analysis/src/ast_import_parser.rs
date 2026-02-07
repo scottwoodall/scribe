@@ -108,13 +108,14 @@ impl SimpleAstParser {
         ] {
             if !pool.contains_key(&language) {
                 let mut parser = Parser::new();
-                let ts_language = language.tree_sitter_language();
-                parser.set_language(ts_language).map_err(|e| {
-                    scribe_core::ScribeError::parse(format!(
-                        "Failed to set tree-sitter language: {}",
-                        e
-                    ))
-                })?;
+                parser
+                    .set_language(language.tree_sitter_language())
+                    .map_err(|e| {
+                        scribe_core::ScribeError::parse(format!(
+                            "Failed to set tree-sitter language: {}",
+                            e
+                        ))
+                    })?;
                 pool.insert(language, vec![parser]);
             }
         }
@@ -134,10 +135,14 @@ impl SimpleAstParser {
 
         // Create a new parser if pool is empty
         let mut parser = Parser::new();
-        let ts_language = language.tree_sitter_language();
-        parser.set_language(ts_language).map_err(|e| {
-            scribe_core::ScribeError::parse(format!("Failed to set tree-sitter language: {}", e))
-        })?;
+        parser
+            .set_language(language.tree_sitter_language())
+            .map_err(|e| {
+                scribe_core::ScribeError::parse(format!(
+                    "Failed to set tree-sitter language: {}",
+                    e
+                ))
+            })?;
         Ok(parser)
     }
 

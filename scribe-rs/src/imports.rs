@@ -252,26 +252,14 @@ fn strip_elixir_heredocs_from_line(
             return output;
         }
 
-        let next_double = cursor.find("\"\"\"");
-        let next_single = cursor.find("'''");
-
-        let next_delimiter = match (next_double, next_single) {
-            (Some(double_idx), Some(single_idx)) if double_idx <= single_idx => {
-                Some((double_idx, ElixirHeredocDelimiter::TripleDouble))
-            }
-            (Some(_), Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
-            (Some(double_idx), None) => Some((double_idx, ElixirHeredocDelimiter::TripleDouble)),
-            (None, Some(single_idx)) => Some((single_idx, ElixirHeredocDelimiter::TripleSingle)),
-            (None, None) => None,
-        };
-
-        let Some((start_index, delimiter)) = next_delimiter else {
+        let Some((start_index, start_len, delimiter)) = find_next_elixir_heredoc_start(cursor)
+        else {
             output.push_str(cursor);
             break;
         };
 
         output.push_str(&cursor[..start_index]);
-        cursor = &cursor[start_index + delimiter.token().len()..];
+        cursor = &cursor[start_index + start_len..];
 
         if let Some(end_index) = cursor.find(delimiter.token()) {
             cursor = &cursor[end_index + delimiter.token().len()..];
@@ -283,6 +271,37 @@ fn strip_elixir_heredocs_from_line(
     }
 
     output
+}
+
+fn find_next_elixir_heredoc_start(input: &str) -> Option<(usize, usize, ElixirHeredocDelimiter)> {
+    // Raw heredocs
+    let mut candidates: Vec<(usize, usize, ElixirHeredocDelimiter)> = Vec::new();
+
+    if let Some(idx) = input.find("\"\"\"") {
+        candidates.push((idx, 3, ElixirHeredocDelimiter::TripleDouble));
+    }
+
+    if let Some(idx) = input.find("'''") {
+        candidates.push((idx, 3, ElixirHeredocDelimiter::TripleSingle));
+    }
+
+    // Common sigil heredoc forms (e.g. ~S""", ~s''', ~C""", ~c''')
+    for (pattern, delimiter) in [
+        ("~S\"\"\"", ElixirHeredocDelimiter::TripleDouble),
+        ("~s\"\"\"", ElixirHeredocDelimiter::TripleDouble),
+        ("~C\"\"\"", ElixirHeredocDelimiter::TripleDouble),
+        ("~c\"\"\"", ElixirHeredocDelimiter::TripleDouble),
+        ("~S'''", ElixirHeredocDelimiter::TripleSingle),
+        ("~s'''", ElixirHeredocDelimiter::TripleSingle),
+        ("~C'''", ElixirHeredocDelimiter::TripleSingle),
+        ("~c'''", ElixirHeredocDelimiter::TripleSingle),
+    ] {
+        if let Some(idx) = input.find(pattern) {
+            candidates.push((idx, pattern.len(), delimiter));
+        }
+    }
+
+    candidates.into_iter().min_by_key(|(idx, _, _)| *idx)
 }
 
 /// Extract one Elixir import statement, including grouped aliases like
@@ -530,6 +549,36 @@ require Logger
         assert!(!imports.contains("Not.Real"));
         assert!(!imports.contains("Also.Not.Real"));
         assert!(!imports.contains("Another.Not.Real"));
+    }
+
+    #[test]
+    fn test_elixir_line_fallback_ignores_sigil_heredoc_imports() {
+        let content = r#"
+alias MyApp.Repo
+
+doc = ~S"""
+import Sigil.Not.Real
+"""
+
+chars = ~C'''
+alias Also.Sigil.Not.Real
+'''
+
+notes = ~s"""
+use Third.Sigil.Not.Real
+"""
+
+require Logger
+"#;
+
+        let mut imports = HashSet::new();
+        extract_elixir_imports_line_based(content, &mut imports);
+
+        assert!(imports.contains("MyApp.Repo"));
+        assert!(imports.contains("Logger"));
+        assert!(!imports.contains("Sigil.Not.Real"));
+        assert!(!imports.contains("Also.Sigil.Not.Real"));
+        assert!(!imports.contains("Third.Sigil.Not.Real"));
     }
 
     #[test]
